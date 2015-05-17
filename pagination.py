@@ -5,6 +5,15 @@ import psycopg2
 from psycopg2.extensions import AsIs
 
 
+class MarkerNotFound(Exception):
+
+    def __init__(self, value):
+        self.parameter = value
+
+    def __str__(self):
+        return repr(self.parameter)
+
+
 class Pagination(object):
 
     """Class for pagination query."""
@@ -28,36 +37,40 @@ class Pagination(object):
         self.sort_dirs = sort_dirs or []
 
 
+def limited_by_marker_and_limit(resp, marker_value, limit):
+    start_index = 0
+    if not limit:
+        limit = len(resp)
+    if marker_value:
+        start_index = _get_start_index(resp, marker_value)
+    else:
+        marker_value = 0
+    return resp[start_index:start_index+limit]
+
+
+def _get_start_index(resp, marker_value):
+    start_index = -1
+    for i, record in enumerate(resp):
+        if record[0] == marker_value:
+            start_index = i + 1
+            break
+    if start_index < 0:
+        raise MarkerNotFound("Marker {} not found!".format(marker_value))
+    return start_index
+
+
 def create_sql_query(pagination):
-    pagination_query = ''
     values = []
     main_query = ('SELECT * FROM users')
-    if pagination.marker_value:
-        if pagination.primary_sort_dir == 'desc':
-            pagination_query += ' WHERE id < %s'
-        else:
-            pagination_query += ' WHERE id > %s'
-        values.append(pagination.marker_value)
-
-    pagination_query += ' ORDER BY'
-
+    pagination_query = ' ORDER BY'
     if pagination.sort_keys and pagination.sort_dirs:
         for i in range(0, len(pagination.sort_keys)):
-            # Note (alexstav): all sort keys/dirs except first
-            # should have comma
-            if i != 0:
-                pagination_query += ','
-            pagination_query += ' %s %s'
+            pagination_query += ' %s %s,'
             values.append(pagination.sort_keys[i])
             values.append(pagination.sort_dirs[i])
 
-    pagination_query += ', id %s'
+    pagination_query += ' id %s'
     values.append(pagination.primary_sort_dir)
-
-    if pagination.limit:
-        pagination_query += ' LIMIT %s'
-        values.append(pagination.limit)
-
     result_query = main_query + pagination_query + ';'
     return result_query, values
 
@@ -66,7 +79,7 @@ def print_response(resp):
     print "--------------RESPONSE------------"
     for r in resp:
         print '{}'.format(r)
-    print "----------------------------------"    
+    print "----------------------------------"
 
 
 def main():
@@ -74,23 +87,26 @@ def main():
     try:
         con = psycopg2.connect('dbname=pagination user=alexstav')
         cur = con.cursor()
-        pagination = Pagination(limit=10,
+        pagination = Pagination(limit=None,
                                 primary_sort_dir='asc',
-                                sort_keys=['birth_date'],
-                                sort_dirs=['desc'],
-                                marker_value=5)
+                                sort_keys=['first_name', 'last_name'],
+                                sort_dirs=['asc', 'asc'],
+                                marker_value=None)
         query, values = create_sql_query(pagination)
 
         # Note (alexstav): AsIs need for insert string value
         # into string without quotes
-        print "values:\n{}".format(values)
         values = [AsIs(v) if isinstance(v, basestring) else v
                   for v in values]
-        print "values_asis:\n{}\nquery:\n{}".format(values, query)
 
         cur.execute(query, values)
-        resp = cur.fetchall()
-        print_response(resp)
+        resp_all = cur.fetchall()
+
+        resp_limited = limited_by_marker_and_limit(resp_all,
+                                                   pagination.marker_value,
+                                                   pagination.limit)
+
+        print_response(resp_limited)
     finally:
         if con:
             con.close()
