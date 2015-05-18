@@ -37,42 +37,84 @@ class Pagination(object):
         self.sort_dirs = sort_dirs or []
 
 
-def limited_by_marker_and_limit(resp, marker_value, limit):
-    start_index = 0
-    if not limit:
-        limit = len(resp)
-    if marker_value:
-        start_index = _get_start_index(resp, marker_value)
-    else:
-        marker_value = 0
-    return resp[start_index:start_index+limit]
+def get_marker_record_query(sort_keys):
+    query = 'SELECT {}, id FROM users WHERE id=%s;'
+    selected_rows = ','.join(sort_keys)
+    query = query.format(selected_rows)
+    print query
+    return query
 
 
-def _get_start_index(resp, marker_value):
-    start_index = -1
-    for i, record in enumerate(resp):
-        if record[0] == marker_value:
-            start_index = i + 1
-            break
-    if start_index < 0:
-        raise MarkerNotFound("Marker {} not found!".format(marker_value))
-    return start_index
-
-
-def create_sql_query(pagination):
+def get_scalar_compare_query(keys, dirs, marker):
+    cmp_signs = {'asc': '>', 'desc': '<'}
+    if len(keys) != len(dirs) != len(marker):
+        raise Exception
+    result = []
     values = []
-    main_query = ('SELECT * FROM users')
-    pagination_query = ' ORDER BY'
+    for n in range(len(keys)):
+        compare = ['%s=%%s' % k for k in keys[:n]]
+        values.extend(marker[:n])
+        compare.append('%s%s%%s' % (keys[n], cmp_signs[dirs[n]]))
+        values.append(marker[n])
+        result.append('(%s)' % ' and '.join(compare))
+    query = '(%s)' % ' or '.join(result)
+    return query, values
+
+
+def get_order_query(pagination):
+    values = []
+    query = ' ORDER BY'
     if pagination.sort_keys and pagination.sort_dirs:
         for i in range(0, len(pagination.sort_keys)):
-            pagination_query += ' %s %s,'
+            query += ' %s %s,'
             values.append(pagination.sort_keys[i])
             values.append(pagination.sort_dirs[i])
 
-    pagination_query += ' id %s'
+    query += ' id %s'
     values.append(pagination.primary_sort_dir)
-    result_query = main_query + pagination_query + ';'
-    return result_query, values
+    return query, values
+
+
+def get_main_query(pagination):
+    scalar_values = []
+    order_values = []
+    pagination_query = ''
+    order_query = ''
+
+    keys = pagination.sort_keys
+    dirs = pagination.sort_dirs
+    keys.append('id')
+    dirs.append(pagination.primary_sort_dir)
+    print keys, dirs
+
+    main_query = ('SELECT * FROM users')
+    print main_query
+
+    if pagination.marker_value:
+        # pagination query part (scalar compare)
+        pagination_query = ' WHERE '
+        scalar_query, scalar_values = get_scalar_compare_query(
+            keys, dirs, pagination.marker_value)
+        pagination_query += scalar_query
+        print pagination_query, scalar_values
+
+    # order by query part
+    order_query, order_values = get_order_query(pagination)
+
+    order_values = [AsIs(v) if isinstance(v, basestring) else v
+                    for v in order_values]
+
+    print order_query, order_values
+
+    values = scalar_values + order_values
+
+    main_query = ''.join([main_query, pagination_query, order_query])
+
+    if pagination.limit:
+        main_query += ' LIMIT %s'
+        values.append(pagination.limit)
+
+    return main_query, values
 
 
 def print_response(resp):
@@ -87,26 +129,25 @@ def main():
     try:
         con = psycopg2.connect('dbname=pagination user=alexstav')
         cur = con.cursor()
-        pagination = Pagination(limit=None,
+        pagination = Pagination(limit=5,
                                 primary_sort_dir='asc',
                                 sort_keys=['first_name', 'last_name'],
-                                sort_dirs=['asc', 'asc'],
-                                marker_value=None)
-        query, values = create_sql_query(pagination)
+                                sort_dirs=['asc', 'desc'],
+                                marker_value=16)
 
-        # Note (alexstav): AsIs need for insert string value
-        # into string without quotes
-        values = [AsIs(v) if isinstance(v, basestring) else v
-                  for v in values]
+        if pagination.marker_value:
+            # get marker object from db
+            marker_query = get_marker_record_query(pagination.sort_keys)
+            cur.execute(marker_query, (str(pagination.marker_value),))
+            marker_record = cur.fetchone()
+            pagination.marker_value = marker_record
+
+        query, values = get_main_query(pagination)
 
         cur.execute(query, values)
-        resp_all = cur.fetchall()
+        resp = cur.fetchall()
+        print_response(resp)
 
-        resp_limited = limited_by_marker_and_limit(resp_all,
-                                                   pagination.marker_value,
-                                                   pagination.limit)
-
-        print_response(resp_limited)
     finally:
         if con:
             con.close()
